@@ -17,6 +17,8 @@ dependencies {
     implementation("net.dv8tion:JDA:4.3.0_298")
     implementation("org.jsoup:jsoup:1.14.1")
     implementation("io.github.furstenheim:copy_down:1.0")
+    implementation("de.chojo:sql-util:1.0.2")
+    implementation("org.postgresql", "postgresql", "42.2.22")
 
     // Logging
     implementation("org.slf4j", "slf4j-api", "1.7.30")

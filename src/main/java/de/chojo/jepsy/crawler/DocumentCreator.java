@@ -1,21 +1,19 @@
 package de.chojo.jepsy.crawler;
 
-import de.chojo.jepsy.document.DocumentMeta;
-import de.chojo.jepsy.document.DocumentMetaBuilder;
 import de.chojo.jepsy.document.JepDocument;
 import de.chojo.jepsy.document.JepDocumentBuilder;
-import io.github.furstenheim.CopyDown;
+import de.chojo.jepsy.document.JepDocumentMeta;
+import de.chojo.jepsy.document.JepDocumentMetaBuilder;
+import de.chojo.jepsy.parser.MarkdownParser;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.slf4j.Logger;
 
 import java.io.IOException;
-import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -25,7 +23,6 @@ public class DocumentCreator {
     private static final Logger log = getLogger(DocumentCreator.class);
     private static final String URL = "https://openjdk.java.net/jeps/";
     private final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm");
-    private final CopyDown copyDown = new CopyDown();
 
     public CompletableFuture<Optional<JepDocument>> retrieveDocument(int number) {
         return CompletableFuture.supplyAsync(() -> getDocument(number));
@@ -34,23 +31,34 @@ public class DocumentCreator {
     private Optional<JepDocument> getDocument(int jep) {
 
         var optDocument = getSoupDocument(jep);
-        if (optDocument.isEmpty()) return Optional.empty();
+        if (optDocument.isEmpty()) {
+            log.warn("No document found.");
+            return Optional.empty();
+        }
+
+        var builder = new JepDocumentBuilder(jep, optDocument.get().title());
 
         var optMeta = getDocumentMeta(optDocument.get());
 
-        if (optMeta.isEmpty()) return Optional.empty();
+        if (optMeta.isEmpty()) {
+            log.warn("No document meta");
+            return Optional.empty();
+        }
 
-        return getDocumentContent(optDocument.get(), optMeta.get());
+        builder.setMeta(optMeta.get());
+
+        return getDocumentContent(builder, optDocument.get());
     }
 
-    private Optional<JepDocument> getDocumentContent(Document document, DocumentMeta meta) {
-        var builder = new JepDocumentBuilder(meta);
-
+    private Optional<JepDocument> getDocumentContent(JepDocumentBuilder builder, Document document) {
         var mainElement = getMainElement(document);
 
         var markdowns = mainElement.getElementsByClass("markdown");
 
-        if (markdowns.isEmpty()) return Optional.empty();
+        if (markdowns.isEmpty()) {
+            log.warn("No markdown section");
+            return Optional.empty();
+        }
 
         var markdown = markdowns.get(0);
 
@@ -60,7 +68,7 @@ public class DocumentCreator {
         for (var ele : markdown.children()) {
             if (ele.tag().getName().startsWith("h")) {
                 if (chapter != null) {
-                    builder.addChapter(chapter, String.join("\n", entries));
+                    builder.addChapter(chapter, MarkdownParser.htmlToMarkdow(String.join("\n", entries)));
                     entries.clear();
                 }
                 chapter = ele.text();
@@ -68,25 +76,38 @@ public class DocumentCreator {
             }
             entries.add(preCleanElement(ele));
         }
-        builder.addChapter(chapter, String.join("\n", entries));
+        builder.addChapter(chapter, MarkdownParser.htmlToMarkdow(String.join("\n", entries)));
 
-        return Optional.ofNullable(builder.build());
+        return Optional.of(builder.build());
     }
 
     private String preCleanElement(Element element) {
         var code = element.getElementsByTag("pre");
         if (!code.isEmpty()) {
-            return code.html()                    ;
+            return code.html();
         }
+
+        var anchors = element.getElementsByTag("a");
+
+        var html = element.html();
+        for (var anchor : anchors) {
+            var href = anchor.attr("href");
+            var absHref = anchor.attr("abs:href");
+            html = html.replace("href=\"" + href + "\"", "href=\"" + absHref + "\"");
+        }
+
         return element.html();
     }
 
-    private Optional<DocumentMeta> getDocumentMeta(Document document) {
-        var builder = new DocumentMetaBuilder();
+    private Optional<JepDocumentMeta> getDocumentMeta(Document document) {
+        var builder = new JepDocumentMetaBuilder();
 
         var mainElement = getMainElement(document);
         var heads = mainElement.getElementsByClass("head");
-        if (heads.isEmpty()) return Optional.empty();
+        if (heads.isEmpty()) {
+            log.warn("No head section");
+            return Optional.empty();
+        }
 
         var head = heads.get(0);
 
@@ -107,38 +128,26 @@ public class DocumentCreator {
 
             var value = fields.get(1);
 
-            log.info("type {} | value {}", type, value.text());
-
-            switch (type.toLowerCase(Locale.ROOT)) {
-                case "owner" -> builder.setOwner(value.text());
-                case "type" -> builder.setType(value.text());
-                case "scope" -> builder.setScope(value.text());
-                case "status" -> builder.setStatus(value.text());
-                case "release" -> builder.setRelease(value.text());
-                case "component" -> builder.setComponent(value.text());
-                case "relates to" -> builder.addRelated(extractLink(value));
-                case "reviewed by" -> builder.setReviewed(extractNames(value));
-                case "endorsed by" -> builder.addEndorsed(extractNames(value));
-                case "created" -> builder.setCreated(extractDate(value));
-                case "updated" -> builder.setUpdated(extractDate(value));
-                case "issue" -> builder.setIssue(extractLink(value));
-                default -> log.info("Ignoring type {}", type);
-            }
+            addMeta(type, builder, value);
         }
 
         return Optional.of(builder.build());
     }
 
-    private String[] extractNames(Element element) {
-        return element.text().split("\\s?,\\s?");
-    }
-
-    private String extractLink(Element element) {
-        return element.getElementsByTag("a").attr("abs:href");
-    }
-
-    private LocalDateTime extractDate(Element element) {
-        return LocalDateTime.parse(element.text(), formatter);
+    private void addMeta(String type, JepDocumentMetaBuilder builder, Element element) {
+        var anchor = element.getElementsByTag("a");
+        if (!anchor.isEmpty()) {
+            var absUrl = anchor.get(0).absUrl("href");
+            builder.addMeta(type, MarkdownParser.url(element.text().trim(), absUrl));
+            return;
+        }
+        if (element.text().contains(",")) {
+            for (var e : element.text().split(",")) {
+                builder.addMeta(type, e);
+            }
+            return;
+        }
+        builder.addMeta(type, element.text());
     }
 
     private Element getMainElement(Document document) {
@@ -147,8 +156,9 @@ public class DocumentCreator {
 
     private Optional<Document> getSoupDocument(int jep) {
         try {
-            return Optional.of(Jsoup.connect(getJepUrl(jep)).get());
+            return Optional.of(Jsoup.newSession().url(getJepUrl(jep)).get());
         } catch (IOException e) {
+            log.warn("Could not retrieve document.", e);
             return Optional.empty();
         }
     }
